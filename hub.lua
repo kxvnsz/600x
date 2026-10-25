@@ -8,9 +8,7 @@ local UIS = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local TextChatService = game:GetService("TextChatService")
 local CoreGui = game:GetService("CoreGui")
-local Debris = game:GetService("Debris")
 local LogService = game:GetService("LogService")
-local SoundService = game:GetService("SoundService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
 
@@ -26,7 +24,7 @@ getgenv().Prediction = 0.150
 getgenv().AutoPrediction = true
 getgenv().FOV = 100
 getgenv().DontShootThesePeople = {"", "", ""}
-getgenv().AimKey = "e"
+getgenv().AimKey = ""
 getgenv().Reach1Range = 3.5
 getgenv().Reach2Range = 4
 getgenv().Reach3Range = 4
@@ -109,17 +107,6 @@ local COLORS = {
     Color3.fromRGB(95, 35, 185),
 }
 
--- Better sounds collection
-local SOUNDS = {
-    {Name = "Ding", ID = "rbxassetid://12222005"},
-    {Name = "Coin", ID = "rbxassetid://604761181"},
-    {Name = "Pop", ID = "rbxassetid://502707692"},
-    {Name = "Click", ID = "rbxassetid://1289827208"},
-    {Name = "Success", ID = "rbxassetid://548740631"},
-    {Name = "Bell", ID = "rbxassetid://448245177"},
-}
-local SelectedSound = SOUNDS[1]
-
 -- ==================================================
 -- CLEANUP & UTILITIES
 -- ==================================================
@@ -162,16 +149,8 @@ local function detectExecutor()
     return tostring(name)
 end
 
-local function playSound(soundId)
-    pcall(function()
-        local sound = Instance.new("Sound")
-        sound.SoundId = soundId or SelectedSound.ID
-        sound.Volume = 0.4
-        sound.Parent = SoundService
-        sound:Play()
-        Debris:AddItem(sound, 3)
-    end)
-end
+-- Interface sounds disabled. Existing callbacks remain compatible.
+local function playSound() end
 
 local AllConnections, AllGuis = {}, {}
 local function track(conn) table.insert(AllConnections, conn); return conn end
@@ -298,17 +277,182 @@ local function makeSection(page, titleText)
     t.Size = UDim2.new(1, -5, 0, 20); return holder
 end
 
+-- Action shortcuts start unassigned. M controls hub visibility.
+local KeyBindings, KeyButtons = {}, {}
+local pendingKeybind = nil
+local reservedKeys = {[Enum.KeyCode.M] = true}
+
+local function refreshKeybind(name)
+    local button = KeyButtons[name]
+    if button and button.Parent then
+        local choosing = pendingKeybind == name
+        local binding = KeyBindings[name]
+        button.Text = choosing and "..." or (binding and binding.Name or "")
+        local icon = button:FindFirstChild("KeyboardIcon")
+        if icon then icon.Visible = not choosing and binding == nil end
+        local clear = button.Parent:FindFirstChild("ClearKeybind_" .. name)
+        if clear then clear.Visible = binding ~= nil end
+        local hint = button:FindFirstChild("ShortcutHint")
+        if hint then
+            local binding = KeyBindings[name]
+            hint.Text = choosing and "Pulsa una tecla | Esc: cancelar"
+                or ((binding and ("Tecla: " .. binding.Name) or "Sin asignar")
+                    .. " | Clic: cambiar | X: quitar")
+        end
+    end
+end
+
+local function cancelKeybind()
+    local previous = pendingKeybind
+    pendingKeybind = nil
+    if previous then refreshKeybind(previous) end
+end
+
+local function clearKeybind(name)
+    if pendingKeybind == name then cancelKeybind() end
+    KeyBindings[name] = nil
+    if name == "E" then getgenv().AimKey = "" end
+    refreshKeybind(name)
+end
+
+local function beginKeybind(name)
+    cancelKeybind()
+    pendingKeybind = name
+    refreshKeybind(name)
+end
+
+local function captureKeybind(input)
+    if not pendingKeybind then return false end
+    -- Consume input while choosing a shortcut; do not toggle an action.
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return true end
+    local key = input.KeyCode
+    if key == Enum.KeyCode.Escape then
+        cancelKeybind()
+        return true
+    end
+    if key == Enum.KeyCode.Unknown or reservedKeys[key] then
+        warn("[600x] Tecla reservada. Elige otra, o pulsa Esc para cancelar.")
+        return true
+    end
+    local name = pendingKeybind
+    for other, binding in pairs(KeyBindings) do
+        if other ~= name and binding == key then
+            warn("[600x] Esa tecla ya tiene otra función. Elige otra.")
+            return true
+        end
+    end
+    KeyBindings[name] = key
+    if name == "E" then
+        getgenv().AimKey = KeyBindings[name] and KeyBindings[name].Name:lower() or ""
+    end
+    cancelKeybind()
+    playSound()
+    return true
+end
+
 local function makeToggle(page, titleText, descText, keyText)
     local row = Instance.new("Frame")
     row.Size = UDim2.new(1, -4, 0, 58); row.BackgroundColor3 = CONFIG.Panel; row.BorderSizePixel = 0; row.Parent = page
     corner(row, 7); stroke(row, Color3.fromRGB(42, 35, 55), 1)
 
     local title = label(row, titleText, 12, UDim2.fromOffset(13, 8), CONFIG.Text, Enum.Font.GothamBold)
-    title.Size = UDim2.new(1, -150, 0, 18)
+    title.Size = UDim2.new(1, -190, 0, 18)
     local desc = label(row, descText, 10, UDim2.fromOffset(13, 29), CONFIG.Muted, Enum.Font.Gotham)
-    desc.Size = UDim2.new(1, -170, 0, 17)
-    local key = label(row, keyText or "", 9, UDim2.new(1, -120, 0, 20), CONFIG.Muted, Enum.Font.GothamBold)
-    key.Size = UDim2.fromOffset(27, 20); key.TextXAlignment = Enum.TextXAlignment.Center; corner(key, 5); key.BackgroundColor3 = Color3.fromRGB(28, 23, 38)
+    desc.Size = UDim2.new(1, -190, 0, 17)
+    local shortcuts = {}
+    for name in string.gmatch(keyText or "", "[^/]+") do
+        table.insert(shortcuts, name)
+    end
+    -- R/Q has two independent buttons: increase / decrease.
+    for index, name in ipairs(shortcuts) do
+        local key = Instance.new("TextButton")
+        key.Name = "Keybind_" .. name
+        key.Size = UDim2.fromOffset(#shortcuts == 1 and 36 or 27, 24)
+        key.Position = UDim2.new(1, (#shortcuts == 1 and -135 or -172) + (index - 1) * 45, 0, 17)
+        key.BackgroundColor3 = Color3.fromRGB(17, 13, 23)
+        key.BorderSizePixel = 0
+        key.Font = Enum.Font.GothamBold
+        key.TextColor3 = CONFIG.Accent2
+        key.TextSize = 12
+        key.TextScaled = true
+        key.TextWrapped = false
+        key.AutoButtonColor = true
+        key.Parent = row
+        corner(key, 5)
+        local limit = Instance.new("UITextSizeConstraint")
+        limit.MinTextSize = 7
+        limit.MaxTextSize = 12
+        limit.Parent = key
+        stroke(key, Color3.fromRGB(57, 43, 70), 1)
+
+        -- Draw a keyboard icon with UI elements; no external image required.
+        local icon = Instance.new("Frame")
+        icon.Name = "KeyboardIcon"
+        icon.AnchorPoint = Vector2.new(0.5, 0.5)
+        icon.Position = UDim2.fromScale(0.5, 0.5)
+        icon.Size = UDim2.fromOffset(14, 10)
+        icon.BackgroundTransparency = 1
+        icon.BorderSizePixel = 0
+        icon.Parent = key
+        corner(icon, 2)
+        stroke(icon, Color3.fromRGB(145, 128, 163), 1)
+        for rowIndex = 0, 1 do
+            for colIndex = 0, 3 do
+                local dot = Instance.new("Frame")
+                dot.Size = UDim2.fromOffset(2, 1)
+                dot.Position = UDim2.fromOffset(2 + colIndex * 3, 2 + rowIndex * 2)
+                dot.BackgroundColor3 = Color3.fromRGB(145, 128, 163)
+                dot.BorderSizePixel = 0
+                dot.Parent = icon
+            end
+        end
+        local spacebar = Instance.new("Frame")
+        spacebar.Size = UDim2.fromOffset(7, 1)
+        spacebar.Position = UDim2.fromOffset(4, 7)
+        spacebar.BackgroundColor3 = Color3.fromRGB(145, 128, 163)
+        spacebar.BorderSizePixel = 0
+        spacebar.Parent = icon
+
+        local hint = Instance.new("TextLabel")
+        hint.Name = "ShortcutHint"
+        hint.AnchorPoint = Vector2.new(1, 1)
+        hint.Position = UDim2.new(1, 0, 0, -4)
+        hint.Size = UDim2.fromOffset(310, 24)
+        hint.BackgroundColor3 = Color3.fromRGB(24, 18, 32)
+        hint.BorderSizePixel = 0
+        hint.TextColor3 = CONFIG.Text
+        hint.Font = Enum.Font.Gotham
+        hint.TextSize = 10
+        hint.ZIndex = 20
+        hint.Visible = false
+        hint.Parent = key
+        corner(hint, 4)
+        local clear = Instance.new("TextButton")
+        clear.Name = "ClearKeybind_" .. name
+        clear.Size = UDim2.fromOffset(#shortcuts == 1 and 16 or 14, 24)
+        clear.Position = UDim2.new(1,
+            (#shortcuts == 1 and -96 or -143) + (index - 1) * 45, 0, 17)
+        clear.BackgroundColor3 = Color3.fromRGB(45, 22, 34)
+        clear.BorderSizePixel = 0
+        clear.Text = "×"
+        clear.TextColor3 = Color3.fromRGB(240, 153, 170)
+        clear.Font = Enum.Font.GothamBold
+        clear.TextSize = 15
+        clear.Parent = row
+        corner(clear, 4)
+        track(clear.Activated:Connect(function()
+            clearKeybind(name)
+            playSound()
+        end))
+        KeyButtons[name] = key
+        refreshKeybind(name)
+        track(key.MouseEnter:Connect(function() hint.Visible = true end))
+        track(key.MouseLeave:Connect(function() hint.Visible = false end))
+        track(key.Activated:Connect(function() beginKeybind(name) end))
+        track(key.MouseButton2Click:Connect(function()
+            clearKeybind(name)
+        end))
+    end
 
     local switch = Instance.new("TextButton")
     switch.Name = "Toggle"; switch.Size = UDim2.fromOffset(55, 24); switch.Position = UDim2.new(1, -68, 0, 17)
@@ -464,7 +608,7 @@ makeButton(PlayerPage, "Reset UI", "Restablecer posición de la interfaz", funct
 makeSection(Exploits, T("FEATURES"))
 local reach1Toggle  = makeToggle(Exploits, T("Reach1"), "Sphere/Line reach", "H")
 local reach2Toggle  = makeToggle(Exploits, T("Reach2"), "Target reach", "Z")
-local reach3Toggle  = makeToggle(Exploits, T("Reach3"), "Rango dinámico R/Q", "R/Q")
+local reach3Toggle  = makeToggle(Exploits, T("Reach3"), "Teclas editables: aumentar / disminuir", "R/Q")
 local auraToggle    = makeToggle(Exploits, T("MineAura"), "Auto minar", "V")
 local silentToggle  = makeToggle(Exploits, T("SilentAim"), "Predicción (Sin FOV)", "E")
 local spyToggle     = makeToggle(Exploits, T("SpyChat"), "Ver chat de todos", "P")
@@ -510,15 +654,6 @@ end)
 makeSection(Config, T("GUI"))
 makeButton(Config, T("Theme"), "Abrir selector de color", function() if ColorPickerGui then ColorPickerGui.Enabled = true; playSound() end end)
 local animBorderToggle = makeToggle(Config, T("Animated_Border"), "Animación del borde", "")
-local soundsToggle     = makeToggle(Config, T("Sounds"), "Sonidos de interfaz", "")
-makeSection(Config, T("Sound_Select"))
-for i, sound in ipairs(SOUNDS) do
-    makeButton(Config, sound.Name, "ID: " .. sound.ID, function()
-        SelectedSound = sound
-        playSound(sound.ID)
-        print("[600x] Sonido seleccionado:", sound.Name)
-    end)
-end
 makeSection(Config, "IDIOMA / LANGUAGE")
 makeButton(Config, "Español", "Cambiar a español", function() LANG = "es"; print("[600x] Idioma → Español"); playSound() end)
 makeButton(Config, "English", "Switch to English", function() LANG = "en"; print("[600x] Language → English"); playSound() end)
@@ -530,7 +665,7 @@ end)
 
 -- CREDITS
 makeSection(Credits, "600x HUB")
-makeButton(Credits, T("Creator"), "Gere / GzlyvchDraevanther", nil)
+makeButton(Credits, T("Creator"), "Gere / GzlyvchDraevanther · Kevin / iiddeennx", nil)
 local creditImage = Instance.new("ImageLabel")
 creditImage.Size = UDim2.new(1, -4, 0, 170); creditImage.BackgroundColor3 = CONFIG.Panel; creditImage.BorderSizePixel = 0
 creditImage.Image = CONFIG.Logo; creditImage.ScaleType = Enum.ScaleType.Fit; creditImage.Parent = Credits; corner(creditImage, 8); stroke(creditImage, CONFIG.AccentDark, 1)
@@ -1216,7 +1351,10 @@ end)
 -- ==================================================
 local hubVisible = true
 track(UIS.InputBegan:Connect(function(input, gp)
-    if gp then return end; local k = input.KeyCode
+    if captureKeybind(input) then return end
+    if gp or UIS:GetFocusedTextBox() then return end
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local k = input.KeyCode
     
     -- M key to toggle hub visibility
     if k == Enum.KeyCode.M then
@@ -1226,25 +1364,25 @@ track(UIS.InputBegan:Connect(function(input, gp)
         return
     end
     
-    if k == Enum.KeyCode.H then SetReach1(not reach1On)
-    elseif k == Enum.KeyCode.Z then reach2Toggle.Set(not reach2Toggle.Get())
-    elseif k == Enum.KeyCode.V then SetAura(not auraOn)
-    elseif k == Enum.KeyCode.G then desyncToggle.Set(not desyncToggle.Get())
-    elseif k == Enum.KeyCode.E then SilentAim = not SilentAim; silentToggle.Set(SilentAim)
-    elseif k == Enum.KeyCode.T then if flyOn then StopFly() else StartFly() end
-    elseif k == Enum.KeyCode.I then invisToggle.Set(not invisOn)
-    elseif k == Enum.KeyCode.F then infJumpToggle.Set(not infJumpOn)
-    elseif k == Enum.KeyCode.B then doubleToggle.Set(not doubleOn)
-    elseif k == Enum.KeyCode.P then spyToggle.Set(not spyOn)
-    elseif k == Enum.KeyCode.K then espToggle.Set(not espOn)
-    elseif k == Enum.KeyCode.Y then iyToggle.Set(not iyToggle.Get())
-    elseif k == Enum.KeyCode.R then
+    if k == KeyBindings.H then SetReach1(not reach1On)
+    elseif k == KeyBindings.Z then reach2Toggle.Set(not reach2Toggle.Get())
+    elseif k == KeyBindings.V then SetAura(not auraOn)
+    elseif k == KeyBindings.G then desyncToggle.Set(not desyncToggle.Get())
+    elseif k == KeyBindings.E then silentToggle.Set(not silentToggle.Get())
+    elseif k == KeyBindings.T then if flyOn then StopFly() else StartFly() end
+    elseif k == KeyBindings.I then invisToggle.Set(not invisOn)
+    elseif k == KeyBindings.F then infJumpToggle.Set(not infJumpOn)
+    elseif k == KeyBindings.B then doubleToggle.Set(not doubleOn)
+    elseif k == KeyBindings.P then spyToggle.Set(not spyOn)
+    elseif k == KeyBindings.K then espToggle.Set(not espOn)
+    elseif k == KeyBindings.Y then iyToggle.Set(not iyToggle.Get())
+    elseif k == KeyBindings.R then
         if not reach3On then SetReach3(true) end
         local now = tick()
         local add = (now - lastR < 0.35) and 1.5 or 0.5
         getgenv().Reach3Range = math.clamp(getgenv().Reach3Range + add, 1, 40)
         lastR = now
-    elseif k == Enum.KeyCode.Q then
+    elseif k == KeyBindings.Q then
         if not reach3On then SetReach3(true) end
         local now = tick()
         local sub = (now - lastQ < 0.35) and 1.5 or 0.5
@@ -1285,7 +1423,7 @@ label(Welcome, LocalPlayer.DisplayName, 11, UDim2.fromOffset(62, 36), CONFIG.Acc
 label(Welcome, CONFIG.Version, 10, UDim2.fromOffset(62, 56), CONFIG.Muted, Enum.Font.Gotham).Size = UDim2.fromOffset(200, 16)
 
 task.spawn(function()
-    playSound(SelectedSound.ID)
+    playSound()
     task.wait(0.15)
     tween(Welcome, TweenInfo.new(0.55, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = UDim2.new(1, -320, 0, 20)}):Play()
     task.wait(3)
